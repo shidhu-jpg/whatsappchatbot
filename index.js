@@ -3,12 +3,12 @@ import express from 'express';
 import makeWASocket, {
     useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import QRCode from 'qrcode';
 import { MongoClient } from 'mongodb';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import pino from 'pino';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -157,13 +157,12 @@ async function startBot() {
     await connectMongo();
 
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-    const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
-        version,
         auth: state,
         printQRInTerminal: true,
         browser: ['Agency Bot', 'Chrome', '1.0'],
+        logger: pino({ level: 'silent' }),
     });
 
     sock.ev.on('creds.update', saveCreds);
