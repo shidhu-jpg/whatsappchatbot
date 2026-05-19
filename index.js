@@ -122,22 +122,30 @@ app.get('/qr', async (req, res) => {
         return res.send('<html><body style="text-align:center;padding:40px;font-family:sans-serif;"><h2>✅ Already connected!</h2><p>The bot is live and running.</p></body></html>');
     }
     if (!latestQR) {
-        return res.send('<html><body style="text-align:center;padding:40px;font-family:sans-serif;"><h2>⏳ QR not ready yet</h2><p>Wait a few seconds and refresh this page.</p><script>setTimeout(()=>location.reload(),3000)</script></body></html>');
+        return res.send(`
+            <html><body style="text-align:center;padding:40px;font-family:sans-serif;">
+                <h2>⏳ QR not ready yet</h2>
+                <p>Baileys is connecting to WhatsApp servers... wait 10–20 seconds and refresh.</p>
+                <p style="color:gray;font-size:13px">Auto-refreshing in 5 seconds</p>
+                <script>setTimeout(()=>location.reload(),5000)</script>
+            </body></html>`);
     }
     try {
         const qrImage = await QRCode.toDataURL(latestQR);
+        const qrText  = await QRCode.toString(latestQR, { type: 'utf8' });
         res.send(`
             <html><head><title>Scan QR</title></head>
             <body style="font-family:sans-serif;text-align:center;padding:40px;background:#111;color:#fff;">
                 <h2>Scan with WhatsApp</h2>
                 <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
                 <img src="${qrImage}" style="width:280px;height:280px;border:8px solid white;border-radius:12px;" />
-                <p style="color:#aaa;font-size:13px">This page auto-refreshes every 20 seconds</p>
+                <p style="color:#aaa;font-size:13px">Auto-refreshes every 20 seconds &bull; If image doesn't work, scan the text QR below</p>
+                <pre style="display:inline-block;font-size:7px;line-height:7px;background:#fff;color:#000;padding:10px;">${qrText}</pre>
                 <script>setTimeout(()=>location.reload(),20000)</script>
             </body></html>
         `);
-    } catch {
-        res.send('<html><body><p>Error generating QR. Refresh the page.</p></body></html>');
+    } catch (e) {
+        res.send(`<html><body style="text-align:center;padding:40px;"><p>Error: ${e.message}</p><a href="/qr">Retry</a></body></html>`);
     }
 });
 
@@ -154,9 +162,17 @@ app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 const conversationHistory = new Map();
 
 async function startBot() {
-    await connectMongo();
+    console.log('🚀 [1/4] startBot() called');
 
+    try {
+        await connectMongo();
+    } catch (e) {
+        console.error('⚠️  MongoDB failed (non-fatal):', e.message);
+    }
+
+    console.log('🔑 [2/4] Loading auth state...');
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+    console.log('✅ [3/4] Auth state loaded. Creating WhatsApp socket...');
 
     const sock = makeWASocket({
         auth: state,
@@ -164,6 +180,7 @@ async function startBot() {
         browser: ['Agency Bot', 'Chrome', '1.0'],
         logger: pino({ level: 'silent' }),
     });
+    console.log('✅ [4/4] Socket created — waiting for QR from WhatsApp...');
 
     sock.ev.on('creds.update', saveCreds);
 
