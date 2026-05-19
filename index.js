@@ -191,7 +191,7 @@ async function startBot() {
             const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
                 console.log('🔄 Disconnected. Reconnecting...');
-                startBot();
+                setTimeout(launchWithRetry, 3000);
             } else {
                 console.log('❌ Logged out. Delete the auth_info folder and restart.');
             }
@@ -292,4 +292,22 @@ async function startBot() {
     });
 }
 
-startBot();
+// Keep the process alive even if WhatsApp connection crashes
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err?.message || err);
+});
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err?.message || err);
+});
+
+async function launchWithRetry() {
+    try {
+        await startBot();
+    } catch (err) {
+        console.error('Bot crashed:', err?.message || err);
+        console.log('Retrying in 10 seconds...');
+        setTimeout(launchWithRetry, 10000);
+    }
+}
+
+launchWithRetry();
