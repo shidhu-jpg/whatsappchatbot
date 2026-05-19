@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from 'baileys';
 import { Boom } from '@hapi/boom';
 import QRCode from 'qrcode';
+import qrcodeTerminal from 'qrcode-terminal';
 import { MongoClient } from 'mongodb';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import pino from 'pino';
@@ -10,7 +10,7 @@ import pino from 'pino';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ============================================================
-// AGENCY SYSTEM PROMPT — Fill in your real details below
+// AGENCY SYSTEM PROMPT — Fill in your real details
 // ============================================================
 const AGENCY_SYSTEM_PROMPT = `
 You are a professional sales and support assistant for a digital agency. Your goal is to answer questions about the agency's services, understand the client's needs, and encourage them to get in touch for a free consultation.
@@ -28,14 +28,13 @@ SERVICES WE OFFER:
    - Business websites (landing pages, portfolios, company sites)
    - E-commerce stores with payment gateway integration
    - Custom web applications and dashboards
-   - CMS websites (WordPress, headless CMS)
    - Progressive Web Apps (PWA)
-   - Tech stack: React, Next.js, Node.js, Tailwind CSS, Supabase
+   - Tech stack: React, Next.js, Node.js, Tailwind CSS
    - Starting price: [e.g., ₹15,000]
-   - Typical timeline: [e.g., 1–4 weeks depending on complexity]
+   - Typical timeline: [e.g., 1–4 weeks]
 
 2. APP DEVELOPMENT
-   - Android & iOS native apps
+   - Android & iOS apps
    - Cross-platform apps using Flutter or React Native
    - Starting price: [e.g., ₹30,000]
    - Typical timeline: [e.g., 4–10 weeks]
@@ -43,22 +42,20 @@ SERVICES WE OFFER:
 3. ADDITIONAL SERVICES:
    - UI/UX Design & Prototyping
    - SEO & Performance Optimization
-   - Website maintenance & annual support packages
-   - API integrations & third-party tool setup
+   - Website maintenance & support packages
 
 OUR PROCESS:
 1. Free 30-minute consultation call
-2. Requirement gathering & project scoping
-3. Custom proposal with fixed price quote
+2. Requirement gathering & scoping
+3. Fixed-price proposal
 4. Design → Development → Testing → Launch
-5. 30-day post-launch support included
+5. 30-day post-launch support
 
 REPLY GUIDELINES:
 - Be warm, friendly, and professional
 - Keep WhatsApp replies short (3–5 sentences max)
-- If someone asks for a price quote, first ask them to describe their project
+- If someone asks for a quote, first ask them to describe their project
 - Always end with a call-to-action (e.g., "Would you like a free consultation call?")
-- If asked something specific you don't know, say "Let me check with our team and get back to you"
 - Never make up prices or timelines not listed above
 - Respond in the same language the user writes in (Hindi, English, Hinglish)
 `;
@@ -70,23 +67,21 @@ let db = null;
 let personalNumbers = new Set();
 
 async function connectMongo() {
-    if (!process.env.MONGODB_URI) {
-        console.log('⚠️  No MONGODB_URI set — personal numbers will reset if server restarts');
-        return;
-    }
+    if (!process.env.MONGODB_URI) return;
     try {
         const client = new MongoClient(process.env.MONGODB_URI, {
             serverSelectionTimeoutMS: 5000,
             connectTimeoutMS: 5000,
-            socketTimeoutMS: 5000,
+            tls: true,
+            tlsInsecure: true,
         });
         await client.connect();
         db = client.db('whatsapp-bot');
         const docs = await db.collection('personal_numbers').find().toArray();
         personalNumbers = new Set(docs.map(d => d.jid));
-        console.log(`📋 Loaded ${personalNumbers.size} personal number(s) from MongoDB`);
+        console.log(`📋 MongoDB connected. ${personalNumbers.size} personal number(s) loaded.`);
     } catch (err) {
-        console.error('MongoDB connection failed:', err.message);
+        console.log('⚠️  MongoDB skipped:', err.message.slice(0, 80));
     }
 }
 
@@ -101,201 +96,183 @@ async function removePersonalNumber(jid) {
 }
 
 // ============================================================
-// EXPRESS SERVER — Health checks + QR code display
+// EXPRESS SERVER — Health + QR page
 // ============================================================
 const app = express();
 let latestQR = null;
 let isConnected = false;
 
 app.get('/', (req, res) => {
-    res.send(`
-        <html><head><title>WhatsApp Bot</title></head>
-        <body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
-            <h2>WhatsApp Agency Bot</h2>
-            <p>Status: <strong style="color:${isConnected ? 'green' : 'orange'}">${isConnected ? '✅ Connected' : '⏳ Not connected'}</strong></p>
-            ${!isConnected ? '<p><a href="/qr" style="font-size:18px">👉 Click here to scan QR code</a></p>' : '<p>Bot is running and replying to messages.</p>'}
-        </body></html>
-    `);
+    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f5f5f5;">
+        <h2>WhatsApp Agency Bot</h2>
+        <p>Status: <strong style="color:${isConnected ? 'green' : 'orange'}">${isConnected ? '✅ Connected' : '⏳ Not connected yet'}</strong></p>
+        ${!isConnected ? '<p><a href="/qr" style="font-size:18px;color:blue">👉 Click here to scan QR code</a></p>' : '<p>Bot is running and replying to messages.</p>'}
+    </body></html>`);
 });
 
 app.get('/qr', async (req, res) => {
     if (isConnected) {
-        return res.send('<html><body style="text-align:center;padding:40px;font-family:sans-serif;"><h2>✅ Already connected!</h2><p>The bot is live and running.</p></body></html>');
+        return res.send('<html><body style="text-align:center;padding:40px;font-family:sans-serif;"><h2>✅ Already connected!</h2><p>The bot is live.</p></body></html>');
     }
     if (!latestQR) {
-        return res.send(`
-            <html><body style="text-align:center;padding:40px;font-family:sans-serif;">
-                <h2>⏳ QR not ready yet</h2>
-                <p>Baileys is connecting to WhatsApp servers... wait 10–20 seconds and refresh.</p>
-                <p style="color:gray;font-size:13px">Auto-refreshing in 5 seconds</p>
-                <script>setTimeout(()=>location.reload(),5000)</script>
-            </body></html>`);
+        return res.send(`<html><body style="text-align:center;padding:40px;font-family:sans-serif;">
+            <h2>⏳ QR not ready yet</h2>
+            <p>Connecting to WhatsApp... wait 15–20 seconds and refresh.</p>
+            <script>setTimeout(()=>location.reload(),5000)</script>
+        </body></html>`);
     }
     try {
         const qrImage = await QRCode.toDataURL(latestQR);
-        const qrText  = await QRCode.toString(latestQR, { type: 'utf8' });
-        res.send(`
-            <html><head><title>Scan QR</title></head>
-            <body style="font-family:sans-serif;text-align:center;padding:40px;background:#111;color:#fff;">
-                <h2>Scan with WhatsApp</h2>
-                <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
-                <img src="${qrImage}" style="width:280px;height:280px;border:8px solid white;border-radius:12px;" />
-                <p style="color:#aaa;font-size:13px">Auto-refreshes every 20 seconds &bull; If image doesn't work, scan the text QR below</p>
-                <pre style="display:inline-block;font-size:7px;line-height:7px;background:#fff;color:#000;padding:10px;">${qrText}</pre>
-                <script>setTimeout(()=>location.reload(),20000)</script>
-            </body></html>
-        `);
+        const qrText = await QRCode.toString(latestQR, { type: 'utf8' });
+        res.send(`<html><head><title>Scan QR</title></head>
+        <body style="font-family:sans-serif;text-align:center;padding:40px;background:#111;color:#fff;">
+            <h2>Scan with WhatsApp</h2>
+            <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+            <img src="${qrImage}" style="width:280px;height:280px;border:8px solid white;border-radius:12px;" /><br><br>
+            <details><summary style="color:#aaa;cursor:pointer">Text QR (if image doesn't work)</summary>
+            <pre style="display:inline-block;font-size:6px;line-height:6px;background:#fff;color:#000;padding:10px;">${qrText}</pre></details>
+            <p style="color:#aaa;font-size:13px">Auto-refreshes every 25 seconds</p>
+            <script>setTimeout(()=>location.reload(),25000)</script>
+        </body></html>`);
     } catch (e) {
-        res.send(`<html><body style="text-align:center;padding:40px;"><p>Error: ${e.message}</p><a href="/qr">Retry</a></body></html>`);
+        res.send(`<html><body style="padding:40px;"><h2>Error showing QR</h2><p>${e.message}</p><a href="/qr">Retry</a></body></html>`);
     }
 });
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', connected: isConnected, uptime: Math.floor(process.uptime()) });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok', connected: isConnected, uptime: Math.floor(process.uptime()) }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🌐 Web server on port ${PORT}`));
 
 // ============================================================
-// WHATSAPP BOT — Baileys WebSocket (no Chrome needed)
+// WHATSAPP BOT — Dynamic import handles any Baileys version
 // ============================================================
 const conversationHistory = new Map();
 
 async function startBot() {
-    console.log('🚀 [1/4] startBot() called');
+    console.log('🚀 Starting WhatsApp bot...');
 
-    try {
-        await connectMongo();
-    } catch (e) {
-        console.error('⚠️  MongoDB failed (non-fatal):', e.message);
+    await connectMongo();
+
+    // Dynamic import handles both old (default) and new (named) Baileys exports
+    const Baileys = await import('@whiskeysockets/baileys');
+    const makeWASocket = Baileys.makeWASocket || Baileys.default;
+    const { useMultiFileAuthState, DisconnectReason } = Baileys;
+
+    if (typeof makeWASocket !== 'function') {
+        throw new Error(`makeWASocket not found. Available exports: ${Object.keys(Baileys).join(', ')}`);
     }
 
-    console.log('🔑 [2/4] Loading auth state...');
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-    console.log('✅ [3/4] Auth state loaded. Creating WhatsApp socket...');
+    console.log('✅ Auth loaded. Connecting to WhatsApp...');
 
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
-        browser: ['Agency Bot', 'Chrome', '1.0'],
-        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false,
+        browser: ['WhatsApp', 'Chrome', '4.0.0'],
+        logger: pino({ level: 'warn' }),
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: undefined,
+        keepAliveIntervalMs: 15000,
     });
-    console.log('✅ [4/4] Socket created — waiting for QR from WhatsApp...');
 
-    // Auto-reconnect if WhatsApp doesn't send QR within 40 seconds
-    const qrTimeout = setTimeout(() => {
+    // Auto-reconnect if QR not received in 45 seconds
+    const qrTimer = setTimeout(() => {
         if (!latestQR && !isConnected) {
-            console.log('⏰ No QR received in 40s — closing socket and retrying...');
-            sock.end(new Error('QR timeout'));
+            console.log('⏰ No QR in 45s — reconnecting...');
+            sock.end();
         }
-    }, 40000);
+    }, 45000);
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // Log every update so we can see what WhatsApp is sending back
-        console.log(`🔄 WA update — conn: ${connection || '-'}, qr: ${!!qr}, err: ${lastDisconnect?.error?.message || '-'}`);
-
         if (qr) {
-            clearTimeout(qrTimeout);
+            clearTimeout(qrTimer);
             latestQR = qr;
             isConnected = false;
-            console.log('\n📱 QR ready — open /qr in your browser to scan it\n');
+            // Print QR to Render logs — user can also check /qr URL
+            console.log('\n📱 QR CODE READY — Visit /qr URL to scan, OR scan the terminal QR below:\n');
+            qrcodeTerminal.generate(qr, { small: true });
         }
 
         if (connection === 'open') {
-            clearTimeout(qrTimeout);
+            clearTimeout(qrTimer);
             isConnected = true;
             latestQR = null;
-            console.log('\n✅ WhatsApp connected! Bot is live.\n');
-            console.log('📱 Send these to YOURSELF on WhatsApp to manage personal numbers:');
-            console.log('   !add 919876543210   → AI skips this number, you reply manually');
-            console.log('   !remove 919876543210 → Remove from personal list');
-            console.log('   !list               → Show all personal numbers\n');
+            console.log('\n✅ WhatsApp connected! Bot is live and replying to messages.');
+            console.log('Send to YOUR OWN number: !add [number], !remove [number], !list\n');
         }
 
         if (connection === 'close') {
             isConnected = false;
-            const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            if (statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 Disconnected. Reconnecting...');
-                setTimeout(launchWithRetry, 3000);
+            const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+            if (code !== DisconnectReason.loggedOut) {
+                console.log(`🔄 Disconnected (code ${code}). Reconnecting in 5s...`);
+                setTimeout(launchWithRetry, 5000);
             } else {
-                console.log('❌ Logged out. Delete the auth_info folder and restart.');
+                console.log('❌ Logged out. Delete auth_info folder and restart.');
             }
         }
     });
 
     // ============================================================
-    // COMMANDS — Send these to YOURSELF on WhatsApp
+    // SELF-COMMANDS — Send to yourself to manage personal numbers
     // ============================================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
 
         for (const msg of messages) {
             if (!msg.message) continue;
-
             const jid = msg.key.remoteJid;
-            const isGroup = jid?.endsWith('@g.us');
-            if (!jid || isGroup) continue;
+            if (!jid || jid.endsWith('@g.us')) continue;
 
             const text = (
                 msg.message.conversation ||
-                msg.message.extendedTextMessage?.text ||
-                ''
+                msg.message.extendedTextMessage?.text || ''
             ).trim();
 
             if (!text) continue;
 
-            // Commands sent from your own number
+            // Commands from your own number
             if (msg.key.fromMe) {
                 if (text.startsWith('!add ')) {
-                    const rawNum = text.slice(5).trim().replace(/\D/g, '');
-                    if (!rawNum) return;
-                    const targetJid = `${rawNum}@s.whatsapp.net`;
+                    const num = text.slice(5).trim().replace(/\D/g, '');
+                    if (!num) continue;
+                    const targetJid = `${num}@s.whatsapp.net`;
                     await addPersonalNumber(targetJid);
-                    await sock.sendMessage(jid, { text: `✅ ${rawNum} added to personal list.\nAI will NOT reply to them — only you will.` }, { quoted: msg });
-                    console.log(`[PERSONAL] Added: ${targetJid}`);
+                    await sock.sendMessage(jid, { text: `✅ ${num} added. AI will NOT reply to them.` }, { quoted: msg });
 
                 } else if (text.startsWith('!remove ')) {
-                    const rawNum = text.slice(8).trim().replace(/\D/g, '');
-                    if (!rawNum) return;
-                    const targetJid = `${rawNum}@s.whatsapp.net`;
+                    const num = text.slice(8).trim().replace(/\D/g, '');
+                    if (!num) continue;
+                    const targetJid = `${num}@s.whatsapp.net`;
                     if (personalNumbers.has(targetJid)) {
                         await removePersonalNumber(targetJid);
-                        await sock.sendMessage(jid, { text: `✅ ${rawNum} removed.\nAI will now auto-reply to them.` }, { quoted: msg });
+                        await sock.sendMessage(jid, { text: `✅ ${num} removed. AI will reply to them again.` }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(jid, { text: `⚠️ ${rawNum} is not in your personal list.` }, { quoted: msg });
+                        await sock.sendMessage(jid, { text: `⚠️ ${num} is not in your personal list.` }, { quoted: msg });
                     }
-                    console.log(`[PERSONAL] Removed: ${targetJid}`);
 
                 } else if (text === '!list') {
-                    if (personalNumbers.size === 0) {
-                        await sock.sendMessage(jid, { text: '📋 Personal list is empty.\n\nUse *!add [number]* to add someone.' }, { quoted: msg });
-                    } else {
-                        const list = [...personalNumbers]
-                            .map((j, i) => `${i + 1}. ${j.replace('@s.whatsapp.net', '')}`)
-                            .join('\n');
-                        await sock.sendMessage(jid, { text: `📋 Personal numbers (${personalNumbers.size}):\n\n${list}\n\nAI skips these — you reply personally.` }, { quoted: msg });
-                    }
+                    const list = personalNumbers.size === 0
+                        ? 'Empty. Use !add [number] to add someone.'
+                        : [...personalNumbers].map((j, i) => `${i + 1}. ${j.replace('@s.whatsapp.net', '')}`).join('\n');
+                    await sock.sendMessage(jid, { text: `📋 Personal numbers:\n\n${list}` }, { quoted: msg });
                 }
                 continue;
             }
 
-            // ============================================================
-            // INCOMING MESSAGES — AI replies unless it's a personal number
-            // ============================================================
+            // Skip personal numbers — you reply manually
             if (personalNumbers.has(jid)) {
-                console.log(`[PERSONAL] ⚠️  Message from ${jid.replace('@s.whatsapp.net', '')} — waiting for your manual reply`);
+                console.log(`[PERSONAL] Message from ${jid.replace('@s.whatsapp.net', '')} — awaiting your reply`);
                 continue;
             }
 
-            if (!conversationHistory.has(jid)) {
-                conversationHistory.set(jid, []);
-            }
+            // AI reply
+            if (!conversationHistory.has(jid)) conversationHistory.set(jid, []);
             const history = conversationHistory.get(jid);
 
             try {
@@ -303,7 +280,6 @@ async function startBot() {
                     model: 'gemini-1.5-flash',
                     systemInstruction: AGENCY_SYSTEM_PROMPT,
                 });
-
                 const chat = model.startChat({ history });
                 const result = await chat.sendMessage(text);
                 const reply = result.response.text();
@@ -313,29 +289,26 @@ async function startBot() {
                 if (history.length > 20) history.splice(0, 2);
 
                 await sock.sendMessage(jid, { text: reply }, { quoted: msg });
-                console.log(`[${new Date().toLocaleTimeString()}] AI → ${jid.replace('@s.whatsapp.net', '')}: "${text.slice(0, 50)}"`);
-
+                console.log(`[BOT] → ${jid.replace('@s.whatsapp.net', '')}: "${text.slice(0, 40)}"`);
             } catch (err) {
                 console.error('Gemini error:', err.message);
-                await sock.sendMessage(jid, { text: 'Sorry, I ran into a small issue. Please try again or contact us directly!' }, { quoted: msg });
+                await sock.sendMessage(jid, { text: 'Sorry, I ran into a small issue. Please try again!' }, { quoted: msg });
             }
         }
     });
 }
 
-// Keep the process alive even if WhatsApp connection crashes
-process.on('unhandledRejection', (err) => {
-    console.error('Unhandled rejection:', err?.message || err);
-});
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught exception:', err?.message || err);
-});
+// ============================================================
+// LAUNCH WITH AUTO-RETRY
+// ============================================================
+process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err?.message));
+process.on('uncaughtException', (err) => console.error('Uncaught exception:', err?.message));
 
 async function launchWithRetry() {
     try {
         await startBot();
     } catch (err) {
-        console.error('Bot crashed:', err?.message || err);
+        console.error('Bot crashed:', err?.message);
         console.log('Retrying in 10 seconds...');
         setTimeout(launchWithRetry, 10000);
     }
