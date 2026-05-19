@@ -1,9 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import makeWASocket, {
-    useMultiFileAuthState,
-    DisconnectReason,
-} from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason } from 'baileys';
 import { Boom } from '@hapi/boom';
 import QRCode from 'qrcode';
 import { MongoClient } from 'mongodb';
