@@ -183,18 +183,31 @@ async function startBot() {
     });
     console.log('✅ [4/4] Socket created — waiting for QR from WhatsApp...');
 
+    // Auto-reconnect if WhatsApp doesn't send QR within 40 seconds
+    const qrTimeout = setTimeout(() => {
+        if (!latestQR && !isConnected) {
+            console.log('⏰ No QR received in 40s — closing socket and retrying...');
+            sock.end(new Error('QR timeout'));
+        }
+    }, 40000);
+
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // Log every update so we can see what WhatsApp is sending back
+        console.log(`🔄 WA update — conn: ${connection || '-'}, qr: ${!!qr}, err: ${lastDisconnect?.error?.message || '-'}`);
+
         if (qr) {
+            clearTimeout(qrTimeout);
             latestQR = qr;
             isConnected = false;
             console.log('\n📱 QR ready — open /qr in your browser to scan it\n');
         }
 
         if (connection === 'open') {
+            clearTimeout(qrTimeout);
             isConnected = true;
             latestQR = null;
             console.log('\n✅ WhatsApp connected! Bot is live.\n');
