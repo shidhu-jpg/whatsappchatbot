@@ -75,7 +75,11 @@ async function connectMongo() {
         return;
     }
     try {
-        const client = new MongoClient(process.env.MONGODB_URI);
+        const client = new MongoClient(process.env.MONGODB_URI, {
+            serverSelectionTimeoutMS: 5000,
+            connectTimeoutMS: 5000,
+            socketTimeoutMS: 5000,
+        });
         await client.connect();
         db = client.db('whatsapp-bot');
         const docs = await db.collection('personal_numbers').find().toArray();
